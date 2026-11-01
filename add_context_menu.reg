@@ -1,0 +1,108 @@
+Windows Registry Editor Version 5.00
+
+; Adds a "Storage Explorer" submenu to the Explorer right-click menu (current user only):
+;   - right-click ON a folder
+;   - right-click on empty space INSIDE a folder
+;   - right-click ON a drive (This PC)
+; Undo with remove_context_menu.reg.
+; The folder path is always the LAST argument (drive roots arrive as "C:\", which
+; argv parsing mangles - the scripts repair it, but only when it comes last).
+; The quick summary runs python.exe directly, NOT through wt.exe: Windows Terminal
+; treats ";" in its command line as a new-tab separator and Explorer inserts the
+; folder path unescaped, so a folder like "Artist; Live" would break. On Windows 11
+; the console still opens in Windows Terminal if that is the default terminal.
+
+; Remove any older version of the menu first
+[-HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer]
+[-HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer]
+[-HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer]
+
+; ---------- Right-click ON a folder ----------
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer]
+"MUIVerb"="Storage Explorer"
+"SubCommands"=""
+"Icon"="C:\\Program Files\\Python310\\python.exe"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\1storage]
+@="Show storage"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\1storage\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page storage --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\2dups]
+@="Find same-name files"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\2dups\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page dups --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\3levels]
+@="Storage by level"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\3levels\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page levels --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\4quick]
+@="Quick size summary (terminal)"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\StorageExplorer\shell\4quick\command]
+@="\"C:\\Program Files\\Python310\\python.exe\" \"Q:\\Scripts\\data dedup\\tools\\inspect_folder.py\" --depth 3 --pause \"%1\""
+
+; ---------- Right-click on empty space INSIDE a folder ----------
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer]
+"MUIVerb"="Storage Explorer"
+"SubCommands"=""
+"Icon"="C:\\Program Files\\Python310\\python.exe"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\1storage]
+@="Show storage"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\1storage\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page storage --scan \"%V\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\2dups]
+@="Find same-name files"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\2dups\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page dups --scan \"%V\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\3levels]
+@="Storage by level"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\3levels\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page levels --scan \"%V\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\4quick]
+@="Quick size summary (terminal)"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\StorageExplorer\shell\4quick\command]
+@="\"C:\\Program Files\\Python310\\python.exe\" \"Q:\\Scripts\\data dedup\\tools\\inspect_folder.py\" --depth 3 --pause \"%V\""
+
+; ---------- Right-click ON a drive (This PC) ----------
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer]
+"MUIVerb"="Storage Explorer"
+"SubCommands"=""
+"Icon"="C:\\Program Files\\Python310\\python.exe"
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\1storage]
+@="Show storage"
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\1storage\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page storage --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\2dups]
+@="Find same-name files"
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\2dups\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page dups --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\3levels]
+@="Storage by level"
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\3levels\command]
+@="\"C:\\Program Files\\Python310\\pythonw.exe\" \"Q:\\Scripts\\data dedup\\app\\dd_web.py\" --page levels --scan \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\4quick]
+@="Quick size summary (terminal)"
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\StorageExplorer\shell\4quick\command]
+@="\"C:\\Program Files\\Python310\\python.exe\" \"Q:\\Scripts\\data dedup\\tools\\inspect_folder.py\" --depth 3 --pause \"%1\""
