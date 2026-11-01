@@ -1,0 +1,20 @@
+# Generated output - contains personal file paths, names and dates; never commit
+app output/
+analysis output/
+*.pkl
+*.csv
+
+# Scratch space
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
