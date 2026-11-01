@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>Storage Explorer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><rect x="2" y="3" width="20" height="6" rx="2" fill="var(--accent)"/><rect x="2" y="11" width="13" height="4" rx="1.5" fill="var(--accent)" opacity=".65"/><rect x="2" y="17" width="8" height="4" rx="1.5" fill="var(--accent)" opacity=".4"/></svg>
+      <div><b>Storage Explorer</b><small>Disk usage &amp; duplicates</small></div>
+    </div>
+    <nav id="nav">
+      <a data-page="scan"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>Scan</a>
+      <a data-page="storage"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="10" height="18" rx="1.5"/><rect x="15" y="3" width="6" height="8" rx="1.5"/><rect x="15" y="13" width="6" height="8" rx="1.5"/></svg>Storage</a>
+      <a data-page="levels"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h11M4 18h6"/></svg>By level</a>
+      <a data-page="dups"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>Same-name files</a>
+      <a data-page="identical"><svg viewBox="0 0 24 24"><path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M8 10h8M8 14h8"/></svg>Identical files</a>
+      <a data-page="pairs"><svg viewBox="0 0 24 24"><path d="M4 7h7l2 2h7v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 14h8M13 11l3 3-3 3"/></svg>Backup roots</a>
+      <a data-page="export"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Export</a>
+    </nav>
+    <div class="side-foot">
+      <div class="privacy"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Offline &middot; nothing leaves this PC</div>
+      <button id="theme" class="btn ghost sm" title="Switch theme">Theme: System</button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <h1 id="title">Scan</h1>
+      <div id="jobpill" class="pill hidden"><span class="spinner"></span><span id="jobmsg"></span></div>
+    </header>
+    <section id="page-scan" class="page"></section>
+    <section id="page-storage" class="page"></section>
+    <section id="page-levels" class="page"></section>
+    <section id="page-dups" class="page"></section>
+    <section id="page-identical" class="page"></section>
+    <section id="page-pairs" class="page"></section>
+    <section id="page-export" class="page"></section>
+  </main>
+</div>
+
+<div id="scrim" class="scrim"></div>
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div><h2 id="dtitle"></h2><div id="dsub" class="muted"></div></div>
+    <button id="dclose" class="btn ghost icon" title="Close">&times;</button>
+  </div>
+  <div id="dbody" class="drawer-body"></div>
+</aside>
+<div id="tip" class="tip"></div>
+<div id="toast" class="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
