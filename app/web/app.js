@@ -622,7 +622,7 @@ async function renderLevels() {
       <div class="track"><div class="fill" style="width:${(l.size / mx) * 100}%"></div></div>
       <span class="val">${hsize(l.size)}</span></div>`).join('');
   el.innerHTML = `<div class="card"><div class="card-head"><div><h2>Size at each folder level</h2>
-      <p class="sub">Levels count from the drive: level 0 is the drive itself (e.g. C:\), level 1 the folders directly on it (C:\Users), level 2 the next (C:\Users\tanis), and so on. Each level's total is the size of all scanned folders at that depth. Click a level to list its biggest folders.</p></div>
+      <p class="sub">Levels count from the drive: level 0 is the drive itself (e.g. C:\), level 1 the folders directly on it (C:\Users), level 2 the next (C:\Users\Public), and so on. Each level's total is the size of all scanned folders at that depth. Click a level to list its biggest folders.</p></div>
       <select class="input" id="lvlroot"><option value="all">All scanned locations</option>
         ${S.roots.map(r => `<option value="${r.id}" ${String(r.id) === String(st.levelRoot) ? 'selected' : ''}>${esc(r.path)}</option>`).join('')}</select></div>
       <div class="bars" id="lvlbars">${bars}</div></div>
