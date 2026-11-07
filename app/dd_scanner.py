@@ -18,12 +18,10 @@ from array import array
 from concurrent.futures import (FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed, wait)
 
-# Windows file attributes / reparse tags
+from dd_util import err_text, fix_drive, prefix
+
+# Windows file attribute / reparse tags (junctions and symlinks are skipped)
 ATTR_REPARSE = 0x400
-ATTR_OFFLINE = 0x1000
-ATTR_RECALL_ON_OPEN = 0x40000
-ATTR_RECALL_ON_DATA_ACCESS = 0x400000
-CLOUD_ONLY = ATTR_OFFLINE | ATTR_RECALL_ON_OPEN | ATTR_RECALL_ON_DATA_ACCESS
 TAG_MOUNT_POINT = 0xA0000003   # junction
 TAG_SYMLINK = 0xA000000C
 
@@ -68,19 +66,12 @@ def user_folders():
 
 def normalize_roots(roots):
     """Drop roots nested inside another selected root."""
-    norm = []
-    for r in roots:
-        r = r.strip().strip('"').strip()
-        # "Q:" must become "Q:\" BEFORE abspath - abspath("Q:") is the current
-        # directory on drive Q:, not the drive root.
-        if len(r) == 2 and r[1] == ":":
-            r += "\\"
-        norm.append(os.path.abspath(r))
-    norm = sorted(set(norm), key=lambda p: len(p))
+    # "Q:" must become "Q:\" BEFORE abspath - abspath("Q:") is the current
+    # directory on drive Q:, not the drive root.
+    norm = sorted({os.path.abspath(fix_drive(r)) for r in roots}, key=len)
     keep = []
     for r in norm:
-        rl = r.lower().rstrip("\\") + "\\"
-        if not any(rl.startswith(k.lower().rstrip("\\") + "\\") for k in keep):
+        if not any(prefix(r).startswith(prefix(k)) for k in keep):
             keep.append(r)
     return keep
 
@@ -98,8 +89,6 @@ class ScanResult:
         self.d_size = array("q")         # rolled-up totals
         self.d_files = array("q")
         self.d_dirs = array("i")
-        self.d_cloud = array("q")        # bytes flagged cloud-only by Windows (recorded, not used:
-                                         # the app treats every file as local)
         self.d_latest = array("d")       # newest modified time in subtree
         # files
         self.f_dir = array("i")
@@ -107,7 +96,6 @@ class ScanResult:
         self.f_size = array("q")
         self.f_ctime = array("d")
         self.f_mtime = array("d")
-        self.f_cloud = bytearray()
         # misc
         self.roots = []                  # [(root_path, folder_index)]
         self.errors = []                 # [(path, error)]
@@ -135,26 +123,28 @@ class ScanResult:
             self._dir_files = df
         return self._dir_files[i]
 
+    def root_of(self):
+        """[scan-root folder index] for every folder (parents come first)."""
+        out = [0] * len(self.d_path)
+        for i, p in enumerate(self.d_parent):
+            out[i] = i if p < 0 else out[p]
+        return out
+
     def rollup(self):
         n = len(self.d_path)
         self.d_size = array("q", self.d_own_size)
         self.d_files = array("q", self.d_own_files)
         self.d_dirs = array("i", [0]) * n
-        self.d_cloud = array("q", [0]) * n
         self.d_latest = array("d", [0.0]) * n
-        for f in range(len(self.f_dir)):
-            d = self.f_dir[f]
-            if self.f_cloud[f]:
-                self.d_cloud[d] += self.f_size[f]
-            if self.f_mtime[f] > self.d_latest[d]:
-                self.d_latest[d] = self.f_mtime[f]
+        for d, m in zip(self.f_dir, self.f_mtime):
+            if m > self.d_latest[d]:
+                self.d_latest[d] = m
         for i in range(n - 1, -1, -1):
             p = self.d_parent[i]
             if p >= 0:
                 self.d_size[p] += self.d_size[i]
                 self.d_files[p] += self.d_files[i]
                 self.d_dirs[p] += self.d_dirs[i] + 1
-                self.d_cloud[p] += self.d_cloud[i]
                 if self.d_latest[i] > self.d_latest[p]:
                     self.d_latest[p] = self.d_latest[i]
         self._children = None
@@ -197,16 +187,15 @@ def _scan_dir(folder, part, idx):
         with os.scandir(folder) as it:
             entries = list(it)
     except OSError as e:
-        part["errors"].append((folder, e.strerror or str(e)))
+        part["errors"].append((folder, err_text(e)))
         return [], 0, 0
     subdirs = []
     for e in entries:
         try:
             st = e.stat(follow_symlinks=False)
-            attrs = getattr(st, "st_file_attributes", 0)
             if e.is_dir(follow_symlinks=False):
-                tag = getattr(st, "st_reparse_tag", 0)
-                if attrs & ATTR_REPARSE and tag in (TAG_MOUNT_POINT, TAG_SYMLINK):
+                if (getattr(st, "st_file_attributes", 0) & ATTR_REPARSE and
+                        getattr(st, "st_reparse_tag", 0) in (TAG_MOUNT_POINT, TAG_SYMLINK)):
                     part["links"] += 1          # junction / symlink loop guard
                     continue
                 subdirs.append(e.path)
@@ -219,20 +208,23 @@ def _scan_dir(folder, part, idx):
             part["f_size"].append(st.st_size)
             part["f_ctime"].append(st.st_ctime)   # creation time on Windows
             part["f_mtime"].append(st.st_mtime)
-            part["f_cloud"].append(1 if attrs & CLOUD_ONLY else 0)
             own_size += st.st_size
             own_files += 1
         except OSError as ex:
-            part["errors"].append((e.path, ex.strerror or str(ex)))
+            part["errors"].append((e.path, err_text(ex)))
     return subdirs, own_files, own_size
 
 
+# part column -> array typecode (None = plain list); also the ScanResult columns
+_COLS = {"d_path": None, "d_parent": "i", "d_depth": "h", "d_own_size": "q",
+         "d_own_files": "i", "f_dir": "i", "f_name": None, "f_size": "q",
+         "f_ctime": "d", "f_mtime": "d"}
+
+
 def _new_part():
-    return {"d_path": [], "d_parent": array("i"), "d_depth": array("h"),
-            "d_own_size": array("q"), "d_own_files": array("i"),
-            "f_dir": array("i"), "f_name": [], "f_size": array("q"), "f_ctime": array("d"),
-            "f_mtime": array("d"), "f_cloud": bytearray(), "errors": [], "links": 0,
-            "cancelled": False}
+    part = {k: array(t) if t else [] for k, t in _COLS.items()}
+    part.update(errors=[], links=0, cancelled=False)
+    return part
 
 
 def _add_folder(part, folder, parent, depth):
@@ -287,21 +279,14 @@ def _init_worker(files, dirs, nbytes, cancel_event):
 
 def _merge(res, part, attach_to):
     """Append a part to res, shifting its local indices."""
-    base, fbase = len(res.d_path), len(res.f_name)
-    res.d_path.extend(part["d_path"])
+    base = len(res.d_path)
     res.d_parent.extend(attach_to if p < 0 else p + base for p in part["d_parent"])
-    res.d_depth.extend(part["d_depth"])
-    res.d_own_size.extend(part["d_own_size"])
-    res.d_own_files.extend(part["d_own_files"])
     res.f_dir.extend(d + base for d in part["f_dir"])
-    res.f_name.extend(part["f_name"])
-    res.f_size.extend(part["f_size"])
-    res.f_ctime.extend(part["f_ctime"])
-    res.f_mtime.extend(part["f_mtime"])
-    res.f_cloud.extend(part["f_cloud"])
+    for k in _COLS.keys() - {"d_parent", "f_dir"}:
+        getattr(res, k).extend(part[k])
     res.errors.extend(part["errors"])
     res.skipped_links += part["links"]
-    return fbase
+    res.cancelled = res.cancelled or part["cancelled"]
 
 
 class Scanner:
@@ -367,7 +352,7 @@ class Scanner:
             if len(level) >= target or depth >= self.EXPAND_LEVELS:
                 tasks, level = level, []
         # `top` uses real (global) indices: it is merged first, at base 0
-        _merge(res, {**top, "d_parent": top["d_parent"]}, -1)
+        _merge(res, top, -1)
 
         # ---- 2. subtrees in parallel
         if tasks and not self.cancel:
@@ -388,9 +373,7 @@ class Scanner:
             futs = {pool.submit(_walk, p, d, report, lambda: self.cancel): parent
                     for p, parent, d in tasks}
             for fut in as_completed(futs):
-                part = fut.result()
-                _merge(res, part, futs[fut])
-                res.cancelled = res.cancelled or part["cancelled"]
+                _merge(res, fut.result(), futs[fut])
 
     def _run_processes(self, res, tasks, report, totals):
         ctx = mp.get_context("spawn")
@@ -408,11 +391,8 @@ class Scanner:
             while pending:
                 done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
                 for fut in done:
-                    parent, path = futs[fut]
-                    part = fut.result()
-                    _merge(res, part, parent)
-                    res.cancelled = res.cancelled or part["cancelled"]
-                    last_done = path
+                    parent, last_done = futs[fut]
+                    _merge(res, fut.result(), parent)
                 if self.cancel and not cancel_ev.is_set():
                     cancel_ev.set()
                 self.progress = (base[0] + files.value, base[1] + dirs.value,

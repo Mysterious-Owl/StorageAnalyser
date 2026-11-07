@@ -10,6 +10,8 @@ import os
 from collections import defaultdict
 from itertools import combinations
 
+from dd_util import drives_of
+
 MAX_LEVELS = 15
 MAX_PAIR_GROUP = 25
 
@@ -78,22 +80,12 @@ def extension_stats(res):
 def excluded_folders(res, exclude_dev, exclude_system):
     """Per-folder flag (bytearray): 1 = folder is inside a developer / system
     folder that matching should skip. Inherited parent -> child."""
-    return _excluded_folders(res, exclude_dev, exclude_system)
-
-
-def _excluded_folders(res, exclude_dev, exclude_system):
-    n = len(res.d_path)
-    ex = bytearray(n)
-    root_is_drive = {}
-    for rp, ri in res.roots:
-        root_is_drive[ri] = len(rp.rstrip("\\")) == 2
-    top_root = [0] * n
-    for i in range(n):
-        p = res.d_parent[i]
+    ex = bytearray(len(res.d_path))
+    root_is_drive = {ri: len(rp.rstrip("\\")) == 2 for rp, ri in res.roots}
+    top_root = res.root_of()
+    for i, p in enumerate(res.d_parent):
         if p < 0:
-            top_root[i] = i
             continue
-        top_root[i] = top_root[p]
         if ex[p]:
             ex[i] = 1
             continue
@@ -109,10 +101,26 @@ def _excluded_folders(res, exclude_dev, exclude_system):
     return ex
 
 
+def group_common(res, g, paths):
+    """Fields shared by same-name and identical groups: copies newest first,
+    the newest copy, and which drives hold them."""
+    drives = drives_of(paths)
+    files = sorted(g, key=lambda f: -res.f_mtime[f])
+    return {"files": files, "newest": files[0], "copies": len(g),
+            "drives": ", ".join(drives), "multi_drive": len(drives) > 1}
+
+
+def numbered(groups, key):
+    """Sort groups by `key` and give them 1-based "gid"s."""
+    groups.sort(key=key)
+    for i, g in enumerate(groups, 1):
+        g["gid"] = i
+
+
 def build(res, min_size=0, exclude_dev=True, exclude_system=True, progress=None,
           include_ext=None, exclude_ext=None):
     out = DupResult()
-    ex = _excluded_folders(res, exclude_dev, exclude_system)
+    ex = excluded_folders(res, exclude_dev, exclude_system)
     ext_ok = make_ext_filter(include_ext, exclude_ext)
 
     by_name = defaultdict(list)
@@ -195,26 +203,18 @@ def build(res, min_size=0, exclude_dev=True, exclude_system=True, progress=None,
         # ---- group summary ----
         sizes = [res.f_size[f] for f in g]
         distinct = len(set(sizes))
-        newest = max(g, key=lambda f: res.f_mtime[f])
-        drives = sorted({res.d_path[res.f_dir[f]][:2].upper() for f in g})
         total = sum(sizes)
         out.groups.append({
             "name": res.f_name[g[0]],
-            "files": sorted(g, key=lambda f: -res.f_mtime[f]),
-            "copies": len(g),
-            "drives": ", ".join(drives),
-            "multi_drive": len(drives) > 1,
+            **group_common(res, g, [res.d_path[res.f_dir[f]] for f in g]),
             "distinct_sizes": distinct,
             "same_size": distinct == 1,
             "total": total,
             "reclaimable": total - max(sizes) if distinct == 1 else 0,
             "max_levels": max(out.levels[f] for f in g),
-            "newest": newest,
         })
 
-    out.groups.sort(key=lambda r: (-r["reclaimable"], -r["total"]))
-    for i, grp in enumerate(out.groups, 1):
-        grp["gid"] = i
+    numbered(out.groups, lambda r: (-r["reclaimable"], -r["total"]))
 
     for (ra, rb), p in pair_acc.items():
         top = max(p[3].items(), key=lambda kv: kv[1])[0]

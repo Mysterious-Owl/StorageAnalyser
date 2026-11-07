@@ -38,6 +38,7 @@ import dd_export as ex
 import dd_identical as idf
 import dd_scanner as sc
 from dd_folderinfo import FolderInfo
+from dd_util import abs_level, fix_drive, folder_name, is_under
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -75,8 +76,32 @@ S = State()
 
 
 # ------------------------------------------------------------------ helpers
-def abs_level(p):
-    return ex.abs_level(p)
+def arg(q, key, default=""):
+    """First value of a query parameter (q is parse_qs output)."""
+    return (q.get(key) or [default])[0] or default
+
+
+def iarg(q, key, default=0):
+    return int(float(arg(q, key, str(default))))
+
+
+def min_bytes(opts):
+    """The 'minimum size' option (in KB) as bytes."""
+    return int(float(opts.get("minKb", 1) or 0) * 1024)
+
+
+def drives_ok(g, drives):
+    """'multi' / 'single' drive filter on a group ('all' passes everything)."""
+    return drives == "all" or g["multi_drive"] == (drives == "multi")
+
+
+def root_filter(q):
+    """Folder ids of one scan root (?root=<id>), or None for all roots."""
+    root = arg(q, "root", "all")
+    if root == "all":
+        return None
+    ri = int(root)
+    return [i for i, r in enumerate(S.root_of) if r == ri]
 
 
 def describe(i):
@@ -105,21 +130,23 @@ def node(i, parent_size=None):
     t, d, c, a, inh = describe(i)
     ps = parent_size if parent_size else r.d_size[i]
     return {
-        "id": i, "name": os.path.basename(path.rstrip("\\")) or path, "path": path,
+        "id": i, "name": folder_name(path), "path": path,
         "size": r.d_size[i], "files": r.d_files[i], "dirs": r.d_dirs[i],
-        "cloud": r.d_cloud[i], "latest": r.d_latest[i], "level": abs_level(path),
+        "latest": r.d_latest[i], "level": abs_level(path),
         "pct": (r.d_size[i] / ps) if ps else 0,
         "title": t, "desc": d, "cat": c, "advice": a, "inherited": inh,
         "hasChildren": bool(r.children(i)),
     }
 
 
+def drive_dict(d):
+    """sc.list_drives() tuple -> JSON dict."""
+    return dict(zip(("root", "type", "label", "total", "used", "free"), d))
+
+
 def drive_info(path):
     info = getattr(S.res, "drive_info", {}).get(path)
-    if not info:
-        return None
-    return {"root": info[0], "type": info[1], "label": info[2],
-            "total": info[3], "used": info[4], "free": info[5]}
+    return drive_dict(info) if info else None
 
 
 def scan_summary():
@@ -175,15 +202,14 @@ def set_res(res):
     S.dr = None
     S.idr = None
     S.desc_cache = {}
-    root_of = [0] * len(res.d_path)
-    for i in range(len(res.d_path)):
-        p = res.d_parent[i]
-        root_of[i] = i if p < 0 else root_of[p]
-    S.root_of = root_of
+    S.root_of = res.root_of()
 
 
 # ------------------------------------------------------------------ jobs
 BUSY = {"ok": False, "error": "Another task is still running - wait for it to finish."}
+NO_SCAN = {"ok": False, "error": "Run a scan first."}
+NO_IDENTICAL = {"ok": False, "error": "Run 'Find identical files' first."}
+ID_JOBS = ("identical", "quarantine", "undo")    # jobs that report through S.idctl
 
 
 def run_job(kind, fn, on_start=None):
@@ -216,8 +242,7 @@ def job_dups(opts):
         S.job["msg"] = f"Matching names: {i:,} / {n:,} groups"
     S.job["kind"] = "dups"
     S.job["msg"] = "Grouping files by name..."
-    S.dr = dup.build(S.res, int(float(opts.get("minKb", 1)) * 1024),
-                     bool(opts.get("skipDev", True)), bool(opts.get("skipSystem", True)), prog,
+    S.dr = dup.build(S.res, min_bytes(opts), bool(opts.get("skipDev", True)), bool(opts.get("skipSystem", True)), prog,
                      include_ext=opts.get("includeExt"), exclude_ext=opts.get("excludeExt"))
 
 
@@ -271,18 +296,18 @@ def start_load(body):
 
 def start_dups(body):
     if S.res is None:
-        return {"ok": False, "error": "Run a scan first."}
+        return NO_SCAN
     return run_job("dups", lambda: job_dups(body))
 
 
 def start_export(body):
     if S.res is None:
-        return {"ok": False, "error": "Run a scan first."}
+        return NO_SCAN
     keys = body.get("keys", [])
     if "dups" in keys and S.dr is None:
         return {"ok": False, "error": "Same-name matching has not finished yet."}
     if "identical" in keys and S.idr is None:
-        return {"ok": False, "error": "Run 'Find identical files' first."}
+        return NO_IDENTICAL
 
     writers = {
         "folders": lambda: [ex.folder_sizes(S.res, S.fi, OUT_DIR)],
@@ -310,7 +335,7 @@ def start_export(body):
 # ---- identical files (reads contents locally to hash them)
 def start_identical(body):
     if S.res is None:
-        return {"ok": False, "error": "Run a scan first."}
+        return NO_SCAN
     ctl = idf.Control()
 
     def fn():
@@ -318,9 +343,8 @@ def start_identical(body):
         S.job["msg"] = "Finding identical files..."
         try:
             S.idr = idf.find_identical(
-                S.res, min_size=int(float(body.get("minKb", 1)) * 1024),
+                S.res, min_size=min_bytes(body),
                 skip_dev=bool(body.get("skipDev", True)), skip_system=bool(body.get("skipSystem", True)),
-                skip_cloud=False,                      # everything is treated as local
                 verify=bool(body.get("verify", False)),
                 scope=body.get("path", "").strip(), ctl=ctl, cache_path=HASH_CACHE,
                 include_ext=body.get("includeExt"), exclude_ext=body.get("excludeExt"))
@@ -333,20 +357,15 @@ def start_identical(body):
 def _id_filtered(q):
     """Identical groups matching the filter query (dict of lists, like parse_qs)."""
     r = S.res
-    g1 = lambda k, d="": (q.get(k, [d]) or [d])[0]  # noqa: E731
-    name, path = g1("name").lower().strip(), g1("path").lower().strip()
-    drives = g1("drives", "all")
-    min_bytes = float(g1("minMb", "0") or 0) * 1048576
+    name, path = arg(q, "name").lower().strip(), arg(q, "path").lower().strip()
+    drives = arg(q, "drives", "all")
+    least = float(arg(q, "minMb", "0")) * 1048576
     out = []
     for g in S.idr.groups:
         files = _remaining(g)
-        if len(files) < 2 or g["size"] < min_bytes:
+        if len(files) < 2 or g["size"] < least or not drives_ok(g, drives):
             continue
         if name and not any(name in n.lower() for n in g["names"]):
-            continue
-        if drives == "multi" and not g["multi_drive"]:
-            continue
-        if drives == "single" and g["multi_drive"]:
             continue
         if path and not any(path in r.file_path(f).lower() for f in files):
             continue
@@ -364,8 +383,8 @@ def q_idgroups(q):
         return {"total": 0, "rows": []}
     r = S.res
     rows = _id_filtered(q)
-    rows.sort(key=ID_SORTS.get(q.get("sort", ["reclaimable"])[0], ID_SORTS["reclaimable"]))
-    offset, limit = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["200"])[0])
+    rows.sort(key=ID_SORTS.get(arg(q, "sort"), ID_SORTS["reclaimable"]))
+    offset, limit = iarg(q, "offset"), iarg(q, "limit", 200)
     page = []
     for g, files in rows[offset:offset + limit]:
         folders = sorted({r.d_path[r.f_dir[f]] for f in files}, key=str.lower)
@@ -380,16 +399,14 @@ def q_idgroups(q):
 
 def q_idgroup(q):
     r = S.res
-    g = S.idr.groups[int(q["gid"][0]) - 1]
+    g = S.idr.groups[iarg(q, "gid", 1) - 1]
     files = _remaining(g)
-    keep = idf.choose_keeper(r, {**g, "files": files}, q.get("rule", ["newest"])[0],
-                             q.get("text", [""])[0]) if len(files) > 1 else None
+    keep = idf.choose_keeper(r, {**g, "files": files}, arg(q, "rule", "newest"),
+                             arg(q, "text")) if len(files) > 1 else None
     seen, copies = {}, []
     for f in g["files"]:
         link = g["linkid"][f]
-        copies.append({"id": f, "folderId": r.f_dir[f], "path": r.file_path(f), "size": r.f_size[f],
-                       "created": r.f_ctime[f], "modified": r.f_mtime[f],
-                       "newest": f == g["newest"], "moved": f in S.idr.resolved,
+        copies.append({**copy_row(f, g), "moved": f in S.idr.resolved,
                        "linkOf": seen.get(link), "keep": f == keep})
         seen.setdefault(link, r.file_path(f))
     return {"gid": g["gid"], "hash": g["hash"], "size": g["size"], "names": g["names"],
@@ -415,7 +432,7 @@ def _plan(body):
 def start_quarantine(body):
     """dryRun -> just count; otherwise move the planned copies (never deletes)."""
     if S.idr is None:
-        return {"ok": False, "error": "Run 'Find identical files' first."}
+        return NO_IDENTICAL
     try:
         moves = _plan(body)
     except (ValueError, KeyError, IndexError) as e:
@@ -469,17 +486,15 @@ def q_qruns(_q):
 def a_cancel(_body):
     if S.job["kind"] == "scan" and S.scanner:
         S.scanner.cancel = True
-    if S.job["kind"] in ("identical", "quarantine", "undo") and S.idctl:
+    if S.job["kind"] in ID_JOBS and S.idctl:
         S.idctl.cancel = True
     return {"ok": True}
 
 
 # ------------------------------------------------------------------ queries
 def q_init(_q):
-    drives = [{"root": d[0], "type": d[1], "label": d[2], "total": d[3], "used": d[4],
-               "free": d[5]} for d in sc.list_drives()]
     return {
-        "drives": drives,
+        "drives": [drive_dict(d) for d in sc.list_drives()],
         "systemDrive": os.environ.get("SystemDrive", "C:").upper() + "\\",
         "userFolders": sc.user_folders(),
         "cache": os.path.getmtime(CACHE) if os.path.exists(CACHE) else None,
@@ -493,8 +508,7 @@ def q_status(_q):
     if S.job["busy"] and S.job["kind"] == "scan" and S.scanner:
         f, d, b, cur = S.scanner.progress
         prog = {"files": f, "dirs": d, "bytes": b, "current": cur}
-    idprog = S.idctl.as_dict() if S.job["busy"] and S.job["kind"] in (
-        "identical", "quarantine", "undo") and S.idctl else None
+    idprog = S.idctl.as_dict() if S.job["busy"] and S.job["kind"] in ID_JOBS and S.idctl else None
     return {"job": S.job, "progress": prog, "idProgress": idprog, "scan": scan_summary(),
             "dups": dup_summary(), "identical": id_summary(), "exports": S.export_log[-20:]}
 
@@ -503,13 +517,12 @@ def q_folder(q):
     r = S.res
     if r is None:
         return {"error": "no scan"}
-    i = int(q.get("id", [r.roots[0][1]])[0])
+    i = iarg(q, "id", r.roots[0][1])
     n = node(i, r.d_size[r.d_parent[i]] if r.d_parent[i] >= 0 else None)
     chain = []
     p = i
     while p >= 0:
-        chain.append({"id": p, "name": os.path.basename(r.d_path[p].rstrip("\\"))
-                      or r.d_path[p]})
+        chain.append({"id": p, "name": folder_name(r.d_path[p])})
         p = r.d_parent[p]
     kids = sorted(r.children(i), key=lambda c: -r.d_size[c])
     limit = 400
@@ -523,7 +536,6 @@ def q_folder(q):
         "own": {"files": r.d_own_files[i], "size": r.d_own_size[i]},
         "topFiles": [{"id": f, "name": r.f_name[f], "size": r.f_size[f],
                       "created": r.f_ctime[f], "modified": r.f_mtime[f],
-                      "cloud": bool(r.f_cloud[f]),
                       "note": S.fi.describe(r.file_path(f))[0]} for f in files],
     }
 
@@ -532,28 +544,17 @@ def q_levels(q):
     r = S.res
     if r is None:
         return {"levels": []}
-    root = q.get("root", ["all"])[0]
-    rootidx = None if root == "all" else int(root)
-    acc = {}
-    for i, path in enumerate(r.d_path):
-        if rootidx is not None and S.root_of[i] != rootidx:
-            continue
-        a = acc.setdefault(abs_level(path), [0, 0, 0])
-        a[0] += 1
-        a[1] += r.d_size[i]
-        a[2] = max(a[2], r.d_size[i])
+    acc = ex.level_totals(r, folders=root_filter(q))
     return {"levels": [{"level": lv, "folders": a[0], "size": a[1], "largest": a[2]}
                        for lv, a in sorted(acc.items())]}
 
 
 def q_level(q):
     r = S.res
-    lv = int(q.get("level", ["1"])[0])
-    root = q.get("root", ["all"])[0]
-    rootidx = None if root == "all" else int(root)
-    limit = int(q.get("limit", ["500"])[0])
-    idxs = [i for i, p in enumerate(r.d_path) if abs_level(p) == lv and
-            (rootidx is None or S.root_of[i] == rootidx)]
+    lv, limit = iarg(q, "level", 1), iarg(q, "limit", 500)
+    folders = root_filter(q)
+    idxs = [i for i in (range(len(r.d_path)) if folders is None else folders)
+            if abs_level(r.d_path[i]) == lv]
     idxs.sort(key=lambda i: -r.d_size[i])
     return {"total": len(idxs),
             "rows": [node(i, r.d_size[S.root_of[i]]) for i in idxs[:limit]]}
@@ -577,31 +578,23 @@ def q_groups(q):
     dr, r = S.dr, S.res
     if dr is None:
         return {"total": 0, "rows": []}
-    g1 = lambda k, d="": q.get(k, [d])[0]  # noqa: E731
-    name = g1("name").lower().strip()
-    path = g1("path").lower().strip()
-    match, drives = g1("match", "all"), g1("drives", "all")
-    minlv = int(g1("minLevels", "0") or 0)
-    offset, limit = int(g1("offset", "0")), int(g1("limit", "200"))
+    name, path = arg(q, "name").lower().strip(), arg(q, "path").lower().strip()
+    match, drives = arg(q, "match", "all"), arg(q, "drives", "all")
+    minlv = iarg(q, "minLevels")
+    offset, limit = iarg(q, "offset"), iarg(q, "limit", 200)
     out = []
     for g in dr.groups:
         if name and name not in g["name"].lower():
             continue
-        if match == "same" and not g["same_size"]:
+        if match != "all" and g["same_size"] != (match == "same"):
             continue
-        if match == "diff" and g["same_size"]:
-            continue
-        if drives == "multi" and not g["multi_drive"]:
-            continue
-        if drives == "single" and g["multi_drive"]:
-            continue
-        if g["max_levels"] < minlv:
+        if not drives_ok(g, drives) or g["max_levels"] < minlv:
             continue
         if path and not any(path in (r.d_path[r.f_dir[f]].lower() + "\\")
                             for f in g["files"]):
             continue
         out.append(g)
-    sort = g1("sort", "reclaimable")
+    sort = arg(q, "sort", "reclaimable")
     if sort != "reclaimable":
         out.sort(key=SORTS.get(sort, SORTS["reclaimable"]))
     return {"total": len(out),
@@ -610,26 +603,27 @@ def q_groups(q):
 
 
 def q_group(q):
-    dr, r = S.dr, S.res
-    gid = int(q.get("gid", ["1"])[0])
-    g = dr.groups[gid - 1]
-    copies = []
-    for f in g["files"]:
-        copies.append({
-            "id": f, "folderId": r.f_dir[f], "path": r.file_path(f), "size": r.f_size[f],
-            "created": r.f_ctime[f], "modified": r.f_mtime[f], "cloud": bool(r.f_cloud[f]),
-            "levels": dr.levels[f], "rel": dr.rel[f], "root": dr.root[f],
-            "rootTitle": S.fi.describe(dr.root[f])[0], "newest": f == g["newest"],
-            "sameRel": dr.tail_n[f],
-        })
+    dr = S.dr
+    g = dr.groups[iarg(q, "gid", 1) - 1]
+    copies = [{**copy_row(f, g),
+               "levels": dr.levels[f], "rel": dr.rel[f], "root": dr.root[f],
+               "rootTitle": S.fi.describe(dr.root[f])[0], "sameRel": dr.tail_n[f]}
+              for f in g["files"]]
     return {**_group_row(g), "copiesList": copies}
+
+
+def copy_row(f, g):
+    """Fields shared by the same-name and identical group detail panels."""
+    r = S.res
+    return {"id": f, "folderId": r.f_dir[f], "path": r.file_path(f), "size": r.f_size[f],
+            "created": r.f_ctime[f], "modified": r.f_mtime[f], "newest": f == g["newest"]}
 
 
 def q_pairs(q):
     dr = S.dr
     if dr is None:
         return {"total": 0, "rows": []}
-    mn = int(q.get("min", ["10"])[0] or 1)
+    mn = iarg(q, "min", 10) or 1
     rows = [p for p in dr.pairs if p["files"] >= mn]
     return {"total": len(rows), "rows": [
         {**p, "titleA": S.fi.describe(p["root_a"])[0],
@@ -637,8 +631,7 @@ def q_pairs(q):
 
 
 def _inside_scan(path):
-    pl = path.lower().rstrip("\\") + "\\"
-    return any(pl.startswith(rp.lower().rstrip("\\") + "\\") for rp, _ in S.res.roots)
+    return any(is_under(path, rp) for rp, _ in S.res.roots)
 
 
 def a_open(body):
@@ -760,14 +753,6 @@ def open_window(url):
     webbrowser.open(url)
 
 
-def clean_path(arg):
-    """Explorer passes "C:\\" for drives, which argv parsing turns into C:" - repair it."""
-    p = arg.strip().strip('"').strip()
-    if len(p) == 2 and p[1] == ":":
-        p += "\\"
-    return p
-
-
 def main():
     """Usage: dd_web.py [port] [--no-browser] [--page storage|dups|levels] [--scan <folder>]
     --scan must come last (right-click menu passes the folder as the final argument)."""
@@ -777,7 +762,7 @@ def main():
     scan_path = ""
     if "--scan" in args:
         i = args.index("--scan")
-        scan_path = clean_path(" ".join(args[i + 1:]))
+        scan_path = fix_drive(" ".join(args[i + 1:]))   # Explorer's "C:\" arrives as C:"
         args = args[:i]
     page = args[args.index("--page") + 1] if "--page" in args else "storage"
     nums = [a for a in args if a.isdigit()]

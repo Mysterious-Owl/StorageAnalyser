@@ -105,8 +105,8 @@ try:
           not dup.make_ext_filter(["(none)"])("a.txt"))
     stats = dict((e, (n, b)) for e, n, b in dup.extension_stats(res))
     check("extension stats", stats["jpg"] == (4, 1_200_000) and stats["txt"][0] == 6, stats.get("jpg"))
-    check("everything treated as local (cloud not skipped by default)",
-          idf.find_identical.__defaults__[3] is False)
+    check("everything treated as local (no cloud option)",
+          "skip_cloud" not in idf.find_identical.__code__.co_varnames)
 
     g = by[300_000]
     kp = lambda rule, text="": os.path.relpath(res.file_path(idf.choose_keeper(res, g, rule, text)), D)  # noqa: E731

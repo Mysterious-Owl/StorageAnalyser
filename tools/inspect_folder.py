@@ -10,15 +10,16 @@ Writes: analysis output/inspect_<foldername>.csv  (every subfolder)
 --depth only limits what is PRINTED; the whole tree is always scanned so
 sizes are complete. Set DD_OUT_DIR to write the CSV somewhere else.
 """
-import csv
 import os
 import sys
-from collections import defaultdict
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "app"))
-import dd_scanner as sc  # noqa: E402 - needs the app folder on sys.path
+# these need the app folder on sys.path
+import dd_scanner as sc  # noqa: E402
+from dd_duplicates import extension_stats  # noqa: E402
+from dd_util import csv_writer, fix_drive  # noqa: E402
 
 OUT_DIR = os.environ.get("DD_OUT_DIR") or os.path.join(os.path.dirname(HERE), "analysis output")
 
@@ -44,10 +45,7 @@ def parse_args(argv):
     if len(pos) > 1 and pos[-1].isdigit():
         max_depth = int(pos.pop())
     # Explorer passes "C:\" for drives, which argv parsing turns into C:" - repair it
-    root = " ".join(pos).strip().strip('"').strip()
-    if len(root) == 2 and root[1] == ":":
-        root += "\\"
-    return os.path.abspath(root), max_depth, pause
+    return os.path.abspath(fix_drive(" ".join(pos))), max_depth, pause
 
 
 def oldest_created(res):
@@ -105,14 +103,9 @@ def main():
 
     walk(r0, 0)
 
-    ext = defaultdict(lambda: [0, 0])
-    for f in range(len(res.f_name)):
-        e = os.path.splitext(res.f_name[f])[1].lower() or "(none)"
-        ext[e][0] += 1
-        ext[e][1] += res.f_size[f]
     print("\nBy file type:")
-    for e, (n, s) in sorted(ext.items(), key=lambda kv: -kv[1][1])[:15]:
-        print(f"  {e:<14} {n:>8,} files {hs(s):>10}")
+    for e, n, s in extension_stats(res)[:15]:
+        print(f"  {'.' + e if e else '(none)':<14} {n:>8,} files {hs(s):>10}")
 
     print("\nLargest files:")
     for f in sorted(range(len(res.f_name)), key=lambda f: -res.f_size[f])[:15]:
@@ -122,8 +115,8 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     name = os.path.basename(root.rstrip("\\")) or f"drive_{root[0]}"
     out = os.path.join(OUT_DIR, f"inspect_{name.replace(':', '')}.csv")
-    with open(out, "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.writer(fh)
+    fh, w = csv_writer(out)
+    with fh:
         w.writerow(["folder", "level", "size_bytes", "size_mb", "files", "oldest_created",
                     "latest_modified"])
         for i, p in enumerate(res.d_path):

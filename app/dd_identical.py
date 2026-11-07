@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import dd_duplicates as dup
+from dd_util import csv_writer, err_text, prefix
 
 EDGE = 64 * 1024                 # bytes hashed at each end in the partial stage
 SMALL = 2 * EDGE                 # files up to this size are hashed whole in stage 2
@@ -159,11 +160,10 @@ class IdResult:
 DEFAULT_WORKERS = min(16, (os.cpu_count() or 4) + 4)   # I/O-bound: more threads than cores
 
 
-def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=False,
-                   verify=False, scope="", workers=DEFAULT_WORKERS, ctl=None, cache_path=None,
+def find_identical(res, min_size=1, skip_dev=True, skip_system=True, verify=False, scope="",
+                   workers=DEFAULT_WORKERS, ctl=None, cache_path=None,
                    include_ext=None, exclude_ext=None):
-    """skip_cloud (off by default - everything is treated as local) leaves out
-    files Windows marks as cloud-only placeholders, which reading would download.
+    """All files are treated as local.
     include_ext / exclude_ext: only / never these extensions (e.g. ["jpg", "png"])."""
     ctl = ctl or Control()
     t0 = time.time()
@@ -171,7 +171,7 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
     st = defaultdict(int)
     excl = dup.excluded_folders(res, skip_dev, skip_system)
     ext_ok = dup.make_ext_filter(include_ext, exclude_ext)
-    scope_l = scope.lower().rstrip("\\") + "\\" if scope else ""
+    scope_l = prefix(scope) if scope else ""
 
     # ---- 1. size
     by_size = defaultdict(list)
@@ -182,10 +182,7 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
         if ext_ok and not ext_ok(res.f_name[f]):
             st["skippedExt"] += 1
             continue
-        if scope_l and not (res.d_path[res.f_dir[f]].lower().rstrip("\\") + "\\").startswith(scope_l):
-            continue
-        if skip_cloud and res.f_cloud[f]:
-            st["skippedCloud"] += 1
+        if scope_l and not prefix(res.d_path[res.f_dir[f]]).startswith(scope_l):
             continue
         by_size[size].append(f)
     cands = [f for g in by_size.values() if len(g) > 1 for f in g]
@@ -199,19 +196,17 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
     partial, full = {}, {}
 
     def run(fn, items, stage, nbytes):
+        """fn(f) for every file id on the thread pool -> {f: result}; files
+        that can't be read are logged and left out."""
         ctl.start(stage, len(items), nbytes)
-        failed = []
 
         def one(f):
             if ctl.cancel:
                 raise Cancelled()
             try:
                 return f, fn(f)
-            except Cancelled:
-                raise
             except OSError as e:
-                failed.append(f)
-                out.errors.append((paths[f], e.strerror or str(e)))
+                out.errors.append((paths[f], err_text(e)))
                 return f, None
             finally:
                 ctl.add(files=1)
@@ -270,24 +265,9 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
 
     # ---- 4. optional byte-by-byte verification
     if verify:
-        ctl.start("Byte-by-byte check", sum(len(g) - 1 for _, g in final),
-                  sum(k[0] * 2 * (len(g) - 1) for k, g in final))
-
-        def compare(pair):                       # (reference, other) -> same?
-            ref, f = pair
-            try:
-                return f, _same_bytes(paths[ref], paths[f], ctl)
-            except OSError as e:
-                out.errors.append((paths[f], e.strerror or str(e)))
-                return f, None
-            finally:
-                ctl.add(files=1)
-
-        pairs = [(g[0], f) for _, g in final for f in g[1:]]
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            same = dict(pool.map(compare, pairs))
-        if ctl.cancel:
-            raise Cancelled()
+        ref = {f: g[0] for _, g in final for f in g[1:]}     # each copy vs the group's first
+        same = run(lambda f: _same_bytes(paths[ref[f]], paths[f], ctl), list(ref),
+                   "Byte-by-byte check", sum(2 * res.f_size[f] for f in ref))
         checked = []
         for k, g in final:
             keep = [g[0]] + [f for f in g[1:] if same.get(f)]
@@ -307,19 +287,13 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
             except OSError:
                 ids[f] = ("gone", f)
         distinct = len(set(ids.values()))
-        newest = max(g, key=lambda f: res.f_mtime[f])
-        drives = sorted({paths[f][:2].upper() for f in g})
         out.groups.append({
-            "hash": digest, "size": size, "files": sorted(g, key=lambda f: -res.f_mtime[f]),
+            "hash": digest, "size": size, **dup.group_common(res, g, [paths[f] for f in g]),
             "names": sorted({res.f_name[f] for f in g}, key=str.lower),
-            "copies": len(g), "distinct": distinct,
-            "hardlinked": distinct < len(g), "linkid": ids,
-            "reclaimable": size * (distinct - 1), "newest": newest,
-            "drives": ", ".join(drives), "multi_drive": len(drives) > 1,
+            "distinct": distinct, "hardlinked": distinct < len(g), "linkid": ids,
+            "reclaimable": size * (distinct - 1),
         })
-    out.groups.sort(key=lambda g: (-g["reclaimable"], -g["size"]))
-    for i, g in enumerate(out.groups, 1):
-        g["gid"] = i
+    dup.numbered(out.groups, lambda g: (-g["reclaimable"], -g["size"]))
 
     st["groups"] = len(out.groups)
     st["files"] = sum(g["copies"] for g in out.groups)
@@ -335,22 +309,23 @@ def find_identical(res, min_size=1, skip_dev=True, skip_system=True, skip_cloud=
 
 
 # ------------------------------------------------------------------ keepers
+# keeper rule -> sort key (smallest wins); args: path(lower), mtime, text(lower)
+KEEPER_RULES = {
+    "newest": lambda p, m, t: (-m, len(p)),
+    "oldest": lambda p, m, t: (m, len(p)),
+    "shortest": lambda p, m, t: (len(p), -m),
+    "prefer": lambda p, m, t: (t not in p, -m),
+    "avoid": lambda p, m, t: (t in p, -m),
+}
+
+
 def choose_keeper(res, g, rule="newest", text=""):
-    """Pick which copy of an identical group to keep."""
-    files = [f for f in g["files"]]
+    """Pick which copy of an identical group to keep (prefer/avoid need text)."""
     t = text.lower().strip()
-    path = lambda f: res.file_path(f).lower()  # noqa: E731
-    if rule == "oldest":
-        key = lambda f: (res.f_mtime[f], len(path(f)))  # noqa: E731
-    elif rule == "shortest":
-        key = lambda f: (len(path(f)), -res.f_mtime[f])  # noqa: E731
-    elif rule == "prefer" and t:
-        key = lambda f: (t not in path(f), -res.f_mtime[f])  # noqa: E731
-    elif rule == "avoid" and t:
-        key = lambda f: (t in path(f), -res.f_mtime[f])  # noqa: E731
-    else:  # newest
-        key = lambda f: (-res.f_mtime[f], len(path(f)))  # noqa: E731
-    return min(files, key=key)
+    if rule not in KEEPER_RULES or (rule in ("prefer", "avoid") and not t):
+        rule = "newest"
+    key = KEEPER_RULES[rule]
+    return min(g["files"], key=lambda f: key(res.file_path(f).lower(), res.f_mtime[f], t))
 
 
 def plan_moves(res, idr, choices):
@@ -382,8 +357,8 @@ def quarantine(moves, log_dir, ctl=None):
     log = os.path.join(log_dir, f"{run_id}.csv")
     ctl.start("Moving to quarantine", len(moves), sum(m["size"] for m in moves))
     done = []
-    with open(log, "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.writer(fh)
+    fh, w = csv_writer(log)
+    with fh:
         w.writerow(["status", "original", "moved_to", "size", "hash", "kept_copy", "detail"])
         for m in moves:
             if ctl.cancel:
@@ -403,7 +378,7 @@ def quarantine(moves, log_dir, ctl=None):
                     os.rename(src, dest)        # same volume -> instant, nothing copied
                     done.append(m["id"])
             except OSError as e:
-                status, detail = "failed", e.strerror or str(e)
+                status, detail = "failed", err_text(e)
             w.writerow([status, src, dest if status == "moved" else "", m["size"],
                         m["hash"], m["keep"], detail])
             ctl.add(m["size"], 1)
@@ -437,8 +412,8 @@ def undo(log_dir, run_id, ctl=None):
         rows = [r for r in csv.DictReader(fh) if r["status"] == "moved"]
     ctl.start("Undo", len(rows), 0)
     restored = 0
-    with open(log[:-4] + ".undo.csv", "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.writer(fh)
+    fh, w = csv_writer(log[:-4] + ".undo.csv")
+    with fh:
         w.writerow(["status", "restored_to", "from", "detail"])
         for r in rows:
             status, detail = "restored", ""
@@ -450,7 +425,7 @@ def undo(log_dir, run_id, ctl=None):
                     os.rename(r["moved_to"], r["original"])
                     restored += 1
             except OSError as e:
-                status, detail = "failed", e.strerror or str(e)
+                status, detail = "failed", err_text(e)
             w.writerow([status, r["original"], r["moved_to"], detail])
             ctl.add(files=1)
     return restored, len(rows)
