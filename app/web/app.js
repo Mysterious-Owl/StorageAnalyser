@@ -227,11 +227,9 @@ async function doAct(d) {
     case 'copy': await navigator.clipboard.writeText(d.path); toast('Path copied'); break;
     case 'dupes': dupesUnder(d.path); break;
     case 'goto-folder': closeDrawer(); st.folder = d.id === '' ? null : +d.id; go('storage'); break;
-    case 'gq-sort': st.gq.sort = d.sort; st.gq.offset = 0; renderGroups(); break;
-    case 'page': st.gq.offset = Math.max(0, st.gq.offset + (+d.dir) * st.gq.limit); renderGroups(); break;
+    case 'sort': st[d.q].sort = d.sort; st[d.q].offset = 0; GROUP_TABLES[d.q](); break;
+    case 'page': st[d.q].offset = Math.max(0, st[d.q].offset + (+d.dir) * st[d.q].limit); GROUP_TABLES[d.q](); break;
     case 'export': await runExport(d.keys.split(',')); break;
-    case 'id-sort': st.iq.sort = d.sort; st.iq.offset = 0; renderIdGroups(); break;
-    case 'id-page': st.iq.offset = Math.max(0, st.iq.offset + (+d.dir) * st.iq.limit); renderIdGroups(); break;
     case 'q-bulk': await quarantineBulk(); break;
     case 'q-group': await quarantineGroup(+d.gid); break;
     case 'undo': await undoRun(d.run); break;
@@ -253,6 +251,48 @@ function dupesUnder(path) {
   closeDrawer();
   go('dups');
 }
+
+// ---------------------------------------------------------------- shared UI pieces
+// Paged, sortable group tables: qk = 'gq' (same-name) or 'iq' (identical).
+const GROUP_TABLES = { gq: () => renderGroups(), iq: () => renderIdGroups() };
+const sortTh = (qk, key, label, cls = '') => {
+  const on = st[qk].sort === key;
+  return `<th class="sortable ${cls} ${on ? 'sorted' : ''}" data-act="sort" data-q="${qk}" data-sort="${key}">${label}${on ? ' ↓' : ''}</th>`;
+};
+function pagerHtml(qk, r) {
+  const q = st[qk], end = Math.min(r.total, q.offset + r.rows.length);
+  return `<div class="pager">${r.total ? `${fmt(q.offset + 1)}–${fmt(end)} of ${fmt(r.total)}` : ''}
+      <button class="btn sm" data-act="page" data-q="${qk}" data-dir="-1" ${q.offset ? '' : 'disabled'}>Previous</button>
+      <button class="btn sm" data-act="page" data-q="${qk}" data-dir="1" ${end < r.total ? '' : 'disabled'}>Next</button></div>`;
+}
+// Filter bar: segmented buttons + name/path boxes that write into st[qk].
+const DRIVE_SEG = [['all', 'All drives'], ['multi', '2+ drives'], ['single', 'One drive']];
+const segHtml = (qk, key, vals) => `<div class="seg">${vals.map(([v, t]) =>
+  `<button data-seg="${key}" data-q="${qk}" data-v="${v}" class="${st[qk][key] === v ? 'on' : ''}">${t}</button>`).join('')}</div>`;
+const nameFilterHtml = (p, q) => `<input class="input" id="${p}-name" placeholder="Name contains…" value="${esc(q.name)}" style="width:190px">
+        <input class="input mono" id="${p}-path" placeholder="Path contains…" value="${esc(q.path)}" style="flex:1;min-width:220px">`;
+function wireFilters(el, qk, inputs) {   // inputs: {field: '#selector'}
+  const q = st[qk], rerender = GROUP_TABLES[qk];
+  const upd = debounce(() => { Object.entries(inputs).forEach(([k, sel]) => { q[k] = $(sel).value; }); q.offset = 0; rerender(); });
+  Object.values(inputs).forEach(sel => { $(sel).oninput = upd; });
+  $$(`[data-seg][data-q="${qk}"]`, el).forEach(b => b.onclick = () => {
+    q[b.dataset.seg] = b.dataset.v; q.offset = 0;
+    $$(`[data-seg="${b.dataset.seg}"][data-q="${qk}"]`, el).forEach(x => x.classList.toggle('on', x === b));
+    rerender();
+  });
+}
+const statHtml = (k, v, d, hero = false) => `<div class="stat ${hero ? 'hero' : ''}"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+const wireBarTips = sel => $$(sel).forEach(b => { b.onmousemove = e => showTip(b.dataset.tip, e); b.onmouseleave = hideTip; });
+const cancelJob = safe(async ev => { ev?.stopPropagation(); await api('/api/cancel', {}); toast('Cancelling…'); });
+// Folder rows shared by Storage and By level (only the name cell differs).
+const FOLDER_THEAD = first => `<thead><tr><th>${first}</th><th class="w-size">Size</th><th class="num w-share opt2">Share</th><th class="num w-files opt">Files</th>
+          <th class="num w-date opt">Newest change</th><th class="w-acts"></th></tr></thead>`;
+const folderRowHtml = (c, nameCell) => `<tr class="click" data-row="folder" data-id="${c.id}">
+      <td><div class="name">${IC.folder}<div style="min-width:0">${nameCell}</div></div></td>
+      <td>${sizeBar(c.pct, hsize(c.size))}</td><td class="num opt2">${pct(c.pct)}</td>
+      <td class="num opt">${fmt(c.files)}</td><td class="num opt">${fdate(c.latest)}</td>
+      <td class="acts"><button class="ibtn" title="Open in Explorer" data-act="open-folder" data-id="${c.id}">${IC.open}</button>
+        <button class="ibtn" title="Same-name files under this folder" data-act="dupes" data-path="${esc(c.path)}">${IC.dup}</button></td></tr>`;
 
 // ================================================================= EXTENSION PICKER
 // Shared by Scan ('s') + Same-name ('d')  -> st.ext.dups, and Identical ('i') -> st.ext.id
@@ -373,7 +413,7 @@ function renderScanProgress(s) {
       <div class="mono muted ellipsis" style="margin-bottom:10px">${esc(p.current)}</div>` : ''}
     <div class="indet"></div>`;
   const c = $('#cancelscan');
-  if (c) c.onclick = safe(async ev => { ev.stopPropagation(); await api('/api/cancel', {}); toast('Cancelling…'); });
+  if (c) c.onclick = cancelJob;
 }
 function lastScanHtml(S) {
   return `<div class="card"><div class="card-head"><div><h2>Current scan</h2>
@@ -535,13 +575,9 @@ async function renderStorage() {
     ? `<a class="cur">${esc(c.name)}</a>`
     : `<a data-act="goto-folder" data-id="${c.id}" class="${data.all ? 'cur' : ''}">${esc(c.name)}</a>`).join('<span class="sep">›</span>');
 
-  const rows = data.children.map(c => `<tr class="click" data-row="folder" data-id="${c.id}">
-      <td><div class="name">${IC.folder}<div style="min-width:0"><div class="row" style="gap:6px;flex-wrap:nowrap"><span class="t ellipsis">${esc(c.name)}</span>${catChips(c)}</div>
-        ${c.title ? `<div class="desc ellipsis">${descLine(c)}</div>` : ''}</div></div></td>
-      <td>${sizeBar(c.pct, hsize(c.size))}</td><td class="num opt2">${pct(c.pct)}</td>
-      <td class="num opt">${fmt(c.files)}</td><td class="num opt">${fdate(c.latest)}</td>
-      <td class="acts"><button class="ibtn" title="Open in Explorer" data-act="open-folder" data-id="${c.id}">${IC.open}</button>
-        <button class="ibtn" title="Same-name files under this folder" data-act="dupes" data-path="${esc(c.path)}">${IC.dup}</button></td></tr>`).join('');
+  const rows = data.children.map(c => folderRowHtml(c,
+    `<div class="row" style="gap:6px;flex-wrap:nowrap"><span class="t ellipsis">${esc(c.name)}</span>${catChips(c)}</div>
+        ${c.title ? `<div class="desc ellipsis">${descLine(c)}</div>` : ''}`)).join('');
   const extraRows = (data.own.files ? `<tr><td><div class="name">${IC.files}<span class="ink2 ellipsis">${plural(data.own.files, 'file')} directly in this folder</span></div></td>
       <td>${sizeBar(data.own.size / (n.size || 1), hsize(data.own.size))}</td><td class="num opt2">${pct(data.own.size / (n.size || 1))}</td><td class="num opt">${fmt(data.own.files)}</td><td class="opt"></td><td></td></tr>` : '')
     + (data.more ? `<tr><td colspan="6" class="muted">+ ${plural(data.more.count, 'smaller folder')} (${hsize(data.more.size)}) not listed</td></tr>` : '');
@@ -596,8 +632,7 @@ async function renderStorage() {
         <svg class="treemap" id="tm" role="img" aria-label="Treemap of folder sizes"></svg>
         <div class="legend">${legend}</div></div>
       <div class="card cq"><div class="card-head"><div><h2>Contents</h2><p class="sub">Biggest first. Click a folder to open it.</p></div></div>
-        <div class="tbl-wrap"><table class="tbl fixed"><thead><tr><th>Name</th><th class="w-size">Size</th><th class="num w-share opt2">Share</th><th class="num w-files opt">Files</th>
-          <th class="num w-date opt">Newest change</th><th class="w-acts"></th></tr></thead><tbody>${rows}${extraRows}
+        <div class="tbl-wrap"><table class="tbl fixed">${FOLDER_THEAD('Name')}<tbody>${rows}${extraRows}
           ${!rows && !extraRows ? '<tr><td colspan="6" class="muted">Empty folder</td></tr>' : ''}</tbody></table></div></div>
     </div><div class="stack">${about}${driveCardHtml}${files}</div></div>`;
   drawTreemap($('#tm'), data);
@@ -622,21 +657,17 @@ async function renderLevels() {
       <div class="track"><div class="fill" style="width:${(l.size / mx) * 100}%"></div></div>
       <span class="val">${hsize(l.size)}</span></div>`).join('');
   el.innerHTML = `<div class="card"><div class="card-head"><div><h2>Size at each folder level</h2>
-      <p class="sub">Levels count from the drive: level 0 is the drive itself (e.g. C:\), level 1 the folders directly on it (C:\Users), level 2 the next (C:\Users\Public), and so on. Each level's total is the size of all scanned folders at that depth. Click a level to list its biggest folders.</p></div>
+      <p class="sub">Levels count from the drive: level 0 is the drive itself (e.g. C:\\), level 1 the folders directly on it (C:\\Users), level 2 the next (C:\\Users\\Public), and so on. Each level's total is the size of all scanned folders at that depth. Click a level to list its biggest folders.</p></div>
       <select class="input" id="lvlroot"><option value="all">All scanned locations</option>
         ${S.roots.map(r => `<option value="${r.id}" ${String(r.id) === String(st.levelRoot) ? 'selected' : ''}>${esc(r.path)}</option>`).join('')}</select></div>
       <div class="bars" id="lvlbars">${bars}</div></div>
     <div class="card cq"><div class="card-head"><div><h2>Biggest folders at level ${st.level}</h2>
       <p class="sub">${plural(rows.total, 'folder')} at this level${rows.total > rows.rows.length ? ` · showing the biggest ${fmt(rows.rows.length)}` : ''}. Click to open in Storage.</p></div></div>
-      <div class="tbl-wrap"><table class="tbl fixed"><thead><tr><th>Folder</th><th class="w-size">Size</th><th class="num w-share opt2">Share</th><th class="num w-files opt">Files</th><th class="num w-date opt">Newest change</th><th class="w-acts"></th></tr></thead>
-      <tbody>${rows.rows.map(c => `<tr class="click" data-row="folder" data-id="${c.id}">
-        <td><div class="name">${IC.folder}<div style="min-width:0"><div class="t path">${esc(c.path)}</div>${c.title ? `<div class="desc ellipsis">${descLine(c)}</div>` : ''}<div class="row" style="gap:6px;margin-top:3px">${catChips(c)}</div></div></div></td>
-        <td>${sizeBar(c.pct, hsize(c.size))}</td><td class="num opt2">${pct(c.pct)}</td><td class="num opt">${fmt(c.files)}</td>
-        <td class="num opt">${fdate(c.latest)}</td>
-        <td class="acts"><button class="ibtn" title="Open in Explorer" data-act="open-folder" data-id="${c.id}">${IC.open}</button>
-          <button class="ibtn" title="Same-name files under this folder" data-act="dupes" data-path="${esc(c.path)}">${IC.dup}</button></td></tr>`).join('')}</tbody></table></div></div>`;
+      <div class="tbl-wrap"><table class="tbl fixed">${FOLDER_THEAD('Folder')}
+      <tbody>${rows.rows.map(c => folderRowHtml(c,
+        `<div class="t path">${esc(c.path)}</div>${c.title ? `<div class="desc ellipsis">${descLine(c)}</div>` : ''}<div class="row" style="gap:6px;margin-top:3px">${catChips(c)}</div>`)).join('')}</tbody></table></div></div>`;
   $('#lvlroot').onchange = e => { st.levelRoot = e.target.value; st.level = null; renderLevels(); };
-  $$('#lvlbars .bar-row').forEach(b => { b.onmousemove = e => showTip(b.dataset.tip, e); b.onmouseleave = hideTip; });
+  wireBarTips('#lvlbars .bar-row');
 }
 RENDER.levels = renderLevels;
 
@@ -665,37 +696,29 @@ async function renderDups() {
       <div class="track"><div class="fill" style="width:${(l.files / mx) * 100}%"></div></div>
       <span class="val">${fmt(l.files)} files · ${hsize(l.bytes)}</span></div>`).join('');
   const q = st.gq;
-  const seg = (key, vals) => `<div class="seg">${vals.map(([v, t]) => `<button data-seg="${key}" data-v="${v}" class="${q[key] === v ? 'on' : ''}">${t}</button>`).join('')}</div>`;
   el.innerHTML = opts + `<div class="section-gap"></div>
     <div class="stats">
-      <div class="stat hero"><div class="k">Potentially reclaimable</div><div class="v">${hsize(D.reclaimable)}</div><div class="d">extra copies with same name and size</div></div>
-      <div class="stat"><div class="k">Names found 2+ times</div><div class="v">${fmt(D.groups)}</div><div class="d">${fmt(D.files)} files involved</div></div>
-      <div class="stat"><div class="k">Same name + same size</div><div class="v">${fmt(D.sameSize)}</div><div class="d">${fmt(D.groups - D.sameSize)} differ in size</div></div>
-      <div class="stat"><div class="k">On 2+ drives</div><div class="v">${fmt(D.multiDrive)}</div><div class="d">${fmt(D.excluded + (D.extSkipped || 0))} files skipped by options</div></div>
+      ${statHtml('Potentially reclaimable', hsize(D.reclaimable), 'extra copies with same name and size', true)}
+      ${statHtml('Names found 2+ times', fmt(D.groups), `${fmt(D.files)} files involved`)}
+      ${statHtml('Same name + same size', fmt(D.sameSize), `${fmt(D.groups - D.sameSize)} differ in size`)}
+      ${statHtml('On 2+ drives', fmt(D.multiDrive), `${fmt(D.excluded + (D.extSkipped || 0))} files skipped by options`)}
     </div><div class="section-gap"></div>
     <div class="card"><h2>How much of the path matches</h2><p class="sub">For each copy: do its parent, grandparent… folders also match another copy? Deep matches mean whole folders were copied (backups).</p>
       <div class="bars" id="duplvls">${lvls}</div></div>
     <div class="card">
       <div class="row" style="margin-bottom:12px">
-        <input class="input" id="f-name" placeholder="Name contains…" value="${esc(q.name)}" style="width:190px">
-        <input class="input mono" id="f-path" placeholder="Path contains…" value="${esc(q.path)}" style="flex:1;min-width:220px">
-        ${seg('match', [['all', 'All sizes'], ['same', 'Same size'], ['diff', 'Different size']])}
-        ${seg('drives', [['all', 'All drives'], ['multi', '2+ drives'], ['single', 'One drive']])}
+        ${nameFilterHtml('f', q)}
+        ${segHtml('gq', 'match', [['all', 'All sizes'], ['same', 'Same size'], ['diff', 'Different size']])}
+        ${segHtml('gq', 'drives', DRIVE_SEG)}
         <label class="field">Levels ≥ <input class="input" id="f-lvl" type="number" min="0" max="15" value="${q.minLevels}" style="width:62px"></label>
         <button class="btn ghost sm" id="f-clear">Reset</button>
       </div>
       <div id="groups"></div></div>`;
   wireDupOpts();
-  $$('#duplvls .bar-row').forEach(b => { b.onmousemove = e => showTip(b.dataset.tip, e); b.onmouseleave = hideTip; });
+  wireBarTips('#duplvls .bar-row');
   markDupLevel();
-  const upd = debounce(() => { q.name = $('#f-name').value; q.path = $('#f-path').value; q.offset = 0; renderGroups(); });
-  $('#f-name').oninput = upd; $('#f-path').oninput = upd;
+  wireFilters(el, 'gq', { name: '#f-name', path: '#f-path' });
   $('#f-lvl').onchange = e => { q.minLevels = +e.target.value || 0; q.offset = 0; markDupLevel(); renderGroups(); };
-  $$('[data-seg]', el).forEach(b => b.onclick = () => {
-    q[b.dataset.seg] = b.dataset.v; q.offset = 0;
-    $$(`[data-seg="${b.dataset.seg}"]`, el).forEach(x => x.classList.toggle('on', x === b));
-    renderGroups();
-  });
   $('#f-clear').onclick = () => { st.gq = { ...GQ_DEFAULT }; renderDups(); };
   await renderGroups();
 }
@@ -712,8 +735,7 @@ async function renderGroups() {
   const seq = ++st.renderSeq;
   const r = await api('/api/groups?' + qs);
   if (seq !== st.renderSeq) return;
-  const th = (key, label, cls = '') => `<th class="sortable ${cls} ${q.sort === key ? 'sorted' : ''}" data-act="gq-sort" data-sort="${key}">${label}${q.sort === key ? ' ↓' : ''}</th>`;
-  const end = Math.min(r.total, q.offset + r.rows.length);
+  const th = (key, label, cls) => sortTh('gq', key, label, cls);
   box.innerHTML = `<div class="row between" style="margin-bottom:6px"><span class="ink2">${fmt(r.total)} groups match · ${hsize(r.reclaimable)} reclaimable</span></div>
     <div class="tbl-wrap"><table class="tbl"><thead><tr>${th('name', 'File name')}${th('copies', 'Copies', 'num')}<th>Drives</th><th>Sizes</th>
       ${th('total', 'Total', 'num')}${th('reclaimable', 'Reclaimable', 'num')}${th('levels', 'Path match')}${th('newest', 'Newest copy', 'num')}</tr></thead>
@@ -724,9 +746,7 @@ async function renderGroups() {
       <td class="num">${hsize(g.total)}</td><td class="num">${g.reclaimable ? hsize(g.reclaimable) : '—'}</td>
       <td><span class="chip">${esc(lvlLabel(g.maxLevels))}</span></td><td class="num">${fdate(g.newest)}</td></tr>`).join('')
       || '<tr><td colspan="8" class="muted">No groups match these filters.</td></tr>'}</tbody></table></div>
-    <div class="pager">${r.total ? `${fmt(q.offset + 1)}–${fmt(end)} of ${fmt(r.total)}` : ''}
-      <button class="btn sm" data-act="page" data-dir="-1" ${q.offset ? '' : 'disabled'}>Previous</button>
-      <button class="btn sm" data-act="page" data-dir="1" ${end < r.total ? '' : 'disabled'}>Next</button></div>`;
+    ${pagerHtml('gq', r)}`;
 }
 RENDER.dups = renderDups;
 
@@ -735,13 +755,24 @@ function closeDrawer() { $('#drawer').classList.remove('on'); $('#scrim').classL
 $('#dclose').onclick = closeDrawer;
 $('#scrim').onclick = closeDrawer;
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+function openDrawer(title, sub, callout, body) {
+  $('#dtitle').textContent = title;
+  $('#dsub').textContent = sub;
+  $('#dbody').innerHTML = `<p class="callout">${callout}</p><div class="section-gap"></div>${body}`;
+  $('#drawer').classList.add('on');
+  $('#scrim').classList.add('on');
+  $('#dbody').scrollTop = 0;
+}
+const copyActsHtml = c => `<div class="acts"><button class="btn sm" data-act="open-file" data-id="${c.id}">${IC.open} Show in Explorer</button>
+        <button class="btn sm" data-act="goto-folder" data-id="${c.folderId}">${IC.tree} Open in Storage</button>
+        <button class="btn ghost sm" data-act="copy" data-path="${esc(c.path)}">${IC.copy} Copy path</button></div>`;
 async function openGroup(gid) {
   const g = await api('/api/group?gid=' + gid);
-  $('#dtitle').textContent = g.name;
-  $('#dsub').textContent = `${g.copies} copies · ${hsize(g.total)} total · ${g.sameSize ? 'all the same size' : g.distinct + ' different sizes'}`
-    + (g.reclaimable ? ` · ${hsize(g.reclaimable)} reclaimable` : '');
-  $('#dbody').innerHTML = `<p class="callout">The <b>bold</b> part of each path is shared with another copy; the grey part (the “root”) is where they differ. Newest copy is outlined.</p><div class="section-gap"></div>`
-    + g.copiesList.map(c => `<div class="copy ${c.newest ? 'newest' : ''}">
+  openDrawer(g.name,
+    `${g.copies} copies · ${hsize(g.total)} total · ${g.sameSize ? 'all the same size' : g.distinct + ' different sizes'}`
+      + (g.reclaimable ? ` · ${hsize(g.reclaimable)} reclaimable` : ''),
+    'The <b>bold</b> part of each path is shared with another copy; the grey part (the “root”) is where they differ. Newest copy is outlined.',
+    g.copiesList.map(c => `<div class="copy ${c.newest ? 'newest' : ''}">
       <div class="path"><span class="root">${esc(c.root)}</span><span class="rel">${esc(c.rel)}</span></div>
       <div class="badges">${c.newest ? '<span class="chip accent">Newest</span>' : ''}
         <span class="chip ${c.levels >= 1 ? 'yes' : 'no'}">Parent folder</span>
@@ -750,12 +781,7 @@ async function openGroup(gid) {
         ${c.sameRel > 1 ? `<span class="chip">${c.sameRel} copies share this path</span>` : ''}
         ${c.rootTitle ? `<span class="chip">root: ${esc(c.rootTitle)}</span>` : ''}</div>
       <div class="meta"><span><b>${hsize(c.size)}</b></span><span>Created ${fdate(c.created)}</span><span>Modified ${fdate(c.modified)}</span></div>
-      <div class="acts"><button class="btn sm" data-act="open-file" data-id="${c.id}">${IC.open} Show in Explorer</button>
-        <button class="btn sm" data-act="goto-folder" data-id="${c.folderId}">${IC.tree} Open in Storage</button>
-        <button class="btn ghost sm" data-act="copy" data-path="${esc(c.path)}">${IC.copy} Copy path</button></div></div>`).join('');
-  $('#drawer').classList.add('on');
-  $('#scrim').classList.add('on');
-  $('#dbody').scrollTop = 0;
+      ${copyActsHtml(c)}</div>`).join(''));
 }
 
 // ================================================================= IDENTICAL
@@ -789,7 +815,7 @@ function renderIdProgress(s) {
       <div><div class="muted">Read</div><div class="v">${hsize(p.doneBytes)} <span class="muted" style="font-size:15px">/ ${hsize(p.totalBytes)}</span></div></div>
       <div><div class="muted">Progress</div><div class="v">${(frac * 100).toFixed(0)}%</div></div></div>
     <div class="meter"><span style="width:${frac * 100}%"></span></div>`;
-  $('#idcancel').onclick = safe(async () => { await api('/api/cancel', {}); toast('Cancelling…'); });
+  $('#idcancel').onclick = cancelJob;
 }
 RENDER.identical = async function renderIdentical() {
   const el = $('#page-identical');
@@ -808,13 +834,12 @@ RENDER.identical = async function renderIdentical() {
     return;
   }
   const q = st.iq;
-  const seg = (key, vals) => `<div class="seg">${vals.map(([v, t]) => `<button data-iseg="${key}" data-v="${v}" class="${q[key] === v ? 'on' : ''}">${t}</button>`).join('')}</div>`;
   el.innerHTML = opts + prog + `<div class="section-gap"></div>
     <div class="stats">
-      <div class="stat hero"><div class="k">Space you can free</div><div class="v">${hsize(I.openReclaimable)}</div><div class="d">by keeping one copy of each</div></div>
-      <div class="stat"><div class="k">Identical groups</div><div class="v">${fmt(I.openGroups)}</div><div class="d">${fmt(I.files)} files in ${fmt(I.groups)} groups found</div></div>
-      <div class="stat"><div class="k">Moved to quarantine</div><div class="v">${fmt(I.moved)}</div><div class="d">this session · undo below</div></div>
-      <div class="stat"><div class="k">Hard-linked groups</div><div class="v">${fmt(I.hardlinkGroups)}</div><div class="d">same file under two names — frees nothing</div></div>
+      ${statHtml('Space you can free', hsize(I.openReclaimable), 'by keeping one copy of each', true)}
+      ${statHtml('Identical groups', fmt(I.openGroups), `${fmt(I.files)} files in ${fmt(I.groups)} groups found`)}
+      ${statHtml('Moved to quarantine', fmt(I.moved), 'this session · undo below')}
+      ${statHtml('Hard-linked groups', fmt(I.hardlinkGroups), 'same file under two names — frees nothing')}
     </div>
     <p class="sub" style="margin:10px 2px 0">${fmt(I.considered)} files considered · ${fmt(I.sameSizeFiles)} shared a size · ${fmt(I.afterQuickCheck)} passed the quick check · ${fmt(I.fullyHashed)} fully hashed · ${fmt(I.cacheHits)} from cache · ${I.verified ? 'byte-by-byte verified · ' : ''}${I.skippedExt ? fmt(I.skippedExt) + ' left out by file type · ' : ''}${fmt(I.errors)} unreadable · ${I.threads ? I.threads + ' threads · ' : ''}${I.seconds}s</p>
     <div class="section-gap"></div>
@@ -827,21 +852,14 @@ RENDER.identical = async function renderIdentical() {
         <button class="btn primary" data-act="q-bulk" ${busy ? 'disabled' : ''}>Move duplicates in filtered groups to quarantine…</button></div></div>
     <div class="card">
       <div class="row" style="margin-bottom:12px">
-        <input class="input" id="if-name" placeholder="Name contains…" value="${esc(q.name)}" style="width:190px">
-        <input class="input mono" id="if-path" placeholder="Path contains…" value="${esc(q.path)}" style="flex:1;min-width:220px">
-        ${seg('drives', [['all', 'All drives'], ['multi', '2+ drives'], ['single', 'One drive']])}
+        ${nameFilterHtml('if', q)}
+        ${segHtml('iq', 'drives', DRIVE_SEG)}
         <label class="field">Min size <input class="input" id="if-min" type="number" min="0" value="${esc(q.minMb)}" placeholder="0" style="width:80px"> MB</label>
       </div><div id="idgroups"></div></div>
     <div class="card" id="qruns"></div>`;
   wireIdOpts();
   if (prog) renderIdProgress(s);
-  const upd = debounce(() => { q.name = $('#if-name').value; q.path = $('#if-path').value; q.minMb = $('#if-min').value; q.offset = 0; renderIdGroups(); });
-  ['#if-name', '#if-path', '#if-min'].forEach(sel => { $(sel).oninput = upd; });
-  $$('[data-iseg]', el).forEach(b => b.onclick = () => {
-    q[b.dataset.iseg] = b.dataset.v; q.offset = 0;
-    $$(`[data-iseg="${b.dataset.iseg}"]`, el).forEach(x => x.classList.toggle('on', x === b));
-    renderIdGroups();
-  });
+  wireFilters(el, 'iq', { name: '#if-name', path: '#if-path', minMb: '#if-min' });
   $('#k-rule').onchange = e => { st.keep.rule = e.target.value; $('#k-text').disabled = !['prefer', 'avoid'].includes(st.keep.rule); };
   $('#k-text').oninput = e => { st.keep.text = e.target.value; };
   await Promise.all([renderIdGroups(), renderQRuns()]);
@@ -862,8 +880,7 @@ async function renderIdGroups() {
   const seq = ++st.renderSeq;
   const r = await api('/api/idgroups?' + new URLSearchParams({ ...idQuery(), sort: q.sort, offset: q.offset, limit: q.limit }));
   if (seq !== st.renderSeq) return;
-  const th = (key, label, cls = '') => `<th class="sortable ${cls} ${q.sort === key ? 'sorted' : ''}" data-act="id-sort" data-sort="${key}">${label}${q.sort === key ? ' ↓' : ''}</th>`;
-  const end = Math.min(r.total, q.offset + r.rows.length);
+  const th = (key, label, cls) => sortTh('iq', key, label, cls);
   box.innerHTML = `<div class="row between" style="margin-bottom:6px"><span class="ink2">${fmt(r.total)} groups match · ${hsize(r.reclaimable)} can be freed</span></div>
     <div class="tbl-wrap cq"><table class="tbl fixed"><thead><tr>${th('name', 'File')}${th('size', 'Size each', 'num w-files')}${th('copies', 'Copies', 'num w-share')}
       ${th('reclaimable', 'Can free', 'num w-files')}<th class="opt">Folders</th>${th('newest', 'Newest', 'num w-date opt')}</tr></thead>
@@ -874,9 +891,7 @@ async function renderIdGroups() {
       <td class="opt" title="${esc(g.folders.join('\n'))}"><div class="mono ell-start muted"><span>${esc(g.folders[0] || '')}</span></div>
         <div class="mono ell-start muted"><span>${esc(g.folders[1] || '')}${g.moreFolders ? ` (+${g.moreFolders} more)` : ''}</span></div></td>
       <td class="num opt">${fdate(g.newest)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No identical groups match these filters.</td></tr>'}</tbody></table></div>
-    <div class="pager">${r.total ? `${fmt(q.offset + 1)}–${fmt(end)} of ${fmt(r.total)}` : ''}
-      <button class="btn sm" data-act="id-page" data-dir="-1" ${q.offset ? '' : 'disabled'}>Previous</button>
-      <button class="btn sm" data-act="id-page" data-dir="1" ${end < r.total ? '' : 'disabled'}>Next</button></div>`;
+    ${pagerHtml('iq', r)}`;
 }
 async function renderQRuns() {
   const box = $('#qruns');
@@ -914,24 +929,19 @@ async function undoRun(run) {
 async function openIdGroup(gid) {
   const g = await api(`/api/idgroup?gid=${gid}&rule=${encodeURIComponent(st.keep.rule)}&text=${encodeURIComponent(st.keep.text)}`);
   const open = g.copiesList.filter(c => !c.moved);
-  $('#dtitle').textContent = g.names.join(' · ');
-  $('#dsub').textContent = `${open.length} identical copies · ${hsize(g.size)} each · ${hsize(g.reclaimable)} can be freed · BLAKE2b ${g.hash.slice(0, 16)}…`;
-  $('#dbody').innerHTML = `<p class="callout">Every copy below has exactly the same bytes. Pick the one to <b>keep</b>; the others are moved to quarantine on their own drive (undoable). Hard links are the same file under another name, so moving them frees nothing and they are left alone.</p><div class="section-gap"></div>`
-    + g.copiesList.map(c => `<label class="copy ${c.keep ? 'newest' : ''}" style="display:block;cursor:${c.moved ? 'default' : 'pointer'};${c.moved ? 'opacity:.55' : ''}">
+  openDrawer(g.names.join(' · '),
+    `${open.length} identical copies · ${hsize(g.size)} each · ${hsize(g.reclaimable)} can be freed · BLAKE2b ${g.hash.slice(0, 16)}…`,
+    'Every copy below has exactly the same bytes. Pick the one to <b>keep</b>; the others are moved to quarantine on their own drive (undoable). Hard links are the same file under another name, so moving them frees nothing and they are left alone.',
+    g.copiesList.map(c => `<label class="copy ${c.keep ? 'newest' : ''}" style="display:block;cursor:${c.moved ? 'default' : 'pointer'};${c.moved ? 'opacity:.55' : ''}">
       <div class="row" style="flex-wrap:nowrap;align-items:flex-start">
         <input type="radio" name="keepcopy" value="${c.id}" ${c.keep ? 'checked' : ''} ${c.moved ? 'disabled' : ''} style="margin-top:3px">
         <div style="min-width:0"><div class="path">${esc(c.path)}</div>
           <div class="badges">${c.newest ? '<span class="chip accent">Newest</span>' : ''}${c.moved ? '<span class="chip">moved to quarantine</span>' : ''}
             ${c.linkOf ? `<span class="chip">hard link of ${esc(c.linkOf.split('\\').slice(-2).join('\\'))}</span>` : ''}</div>
           <div class="meta"><span>Created ${fdate(c.created)}</span><span>Modified ${fdate(c.modified)}</span></div>
-          <div class="acts"><button class="btn sm" data-act="open-file" data-id="${c.id}">${IC.open} Show in Explorer</button>
-            <button class="btn sm" data-act="goto-folder" data-id="${c.folderId}">${IC.tree} Open in Storage</button>
-            <button class="btn ghost sm" data-act="copy" data-path="${esc(c.path)}">${IC.copy} Copy path</button></div></div></div></label>`).join('')
-    + (open.length > 1 ? `<div class="section-gap"></div><button class="btn primary" data-act="q-group" data-gid="${g.gid}" ${st.status?.job?.busy ? 'disabled' : ''}>Keep selected · move the other copies to quarantine…</button>` : '');
+          ${copyActsHtml(c)}</div></div></label>`).join('')
+    + (open.length > 1 ? `<div class="section-gap"></div><button class="btn primary" data-act="q-group" data-gid="${g.gid}" ${st.status?.job?.busy ? 'disabled' : ''}>Keep selected · move the other copies to quarantine…</button>` : ''));
   $$('input[name="keepcopy"]').forEach(r => r.onchange = () => $$('#dbody .copy').forEach(c => c.classList.toggle('newest', $('input', c).checked)));
-  $('#drawer').classList.add('on');
-  $('#scrim').classList.add('on');
-  $('#dbody').scrollTop = 0;
 }
 
 // ================================================================= PAIRS
