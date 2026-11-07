@@ -148,6 +148,7 @@ Root files: launchers (`*.bat`), right-click menu (`*.reg`), `README.md`,
 | `dd_folderinfo.py` + `folder_descriptions.json` | Offline descriptions of ~145 common folders (edit the JSON to add more) |
 | `dd_export.py` | CSV writers |
 | `dd_web.py` + `web/` | The app: local HTTP server, JSON API and HTML/CSS/JS front end |
+| `dd_util.py` | Small shared helpers (drive-letter repair, path tests, CSV writer) |
 
 ### `analysis/`
 

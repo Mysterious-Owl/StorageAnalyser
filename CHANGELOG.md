@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-11-07: Refactor (no new features)
+
+- **Shared helpers:** new `app/dd_util.py` replaces code that several modules
+  had copied: drive-letter repair, path-prefix tests, folder names, levels,
+  error text and the CSV writer.
+- **Engine:**
+  - The scanner's column table drives both creating and merging scan parts.
+  - The unused cloud-only columns are removed. Old saved scans still load.
+  - The identical finder's byte-by-byte check reuses the hashing thread pool.
+  - Keeper rules are now a lookup table.
+  - Same-name and identical groups share their common fields.
+- **Exports:** every CSV is written through one `_csv()` helper.
+  `level_totals()` is shared with the By level page.
+- **Web server:** query-parameter, filter and error-response helpers replace
+  repeated code.
+- **Front end:** the same-name and identical pages share one set of pieces:
+  the sortable table header, pager, filter bar, stat tiles and drawer. The
+  folder table row is shared by Storage and By level. Repeated SVG and card
+  CSS rules are merged, and one unused rule is removed.
+- **Fix:** the By level help text lost its backslashes (it showed "C:Users").
+
 ## 2026-11-01: Local-only cleanup
 
 - **"Cloud-only" removed everywhere:** the scan summary column, the folder

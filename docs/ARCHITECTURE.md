@@ -21,7 +21,9 @@ the [README](../README.md).
 
 The engine (`dd_scanner`, `dd_duplicates`, `dd_identical`, `dd_folderinfo`, `dd_export`) has
 no UI code. The front end (`dd_web` + `web/`) is a thin layer over it.
-Everything uses the Python standard library only.
+Everything uses the Python standard library only. Small helpers used
+across modules (drive-letter repair, path-prefix tests, folder names,
+levels, error text, the Excel-friendly CSV writer) live in `dd_util.py`.
 
 ## Engine
 
@@ -56,10 +58,9 @@ Everything uses the Python standard library only.
 - **Skipped:** junctions and symlinks (reparse tags `MOUNT_POINT` / `SYMLINK`)
   are not followed, which prevents loops such as `Application Data`.
   Cloud-sync placeholders are reparse points too, but they *are* scanned.
-- **All files are treated as local.** Windows' cloud-only attributes
-  (`OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS`) are still recorded
-  (`f_cloud` / `d_cloud`), but nothing in the UI, the exports or the
-  identical-file search uses them.
+- **All files are treated as local.** Windows' cloud-only attributes are
+  not recorded. Scans saved by older versions still load; their extra
+  cloud columns are ignored.
 - **Data model** (`ScanResult`): parallel `array` columns instead of one
   object per file, so a 1.6 M-file PC fits in a few hundred MB.
 
@@ -67,7 +68,7 @@ Everything uses the Python standard library only.
   |---|---|
   | `d_path`, `d_parent`, `d_depth` | `f_dir` (folder index), `f_name` |
   | `d_own_size`, `d_own_files` (direct contents) | `f_size`, `f_ctime` (created), `f_mtime` |
-  | `d_size`, `d_files`, `d_dirs`, `d_cloud`, `d_latest` (rolled up) | `f_cloud` |
+  | `d_size`, `d_files`, `d_dirs`, `d_latest` (rolled up) | |
 
 - **Roll-up:** folders are appended depth-first, so a parent's index is
   always lower than its children's. `rollup()` makes a single reverse pass
@@ -123,9 +124,8 @@ moves added.
 
 - **Candidates:** the same developer/system exclusions as same-name matching,
   plus a minimum size, an optional folder scope and an optional extension
-  filter (`include_ext` / `exclude_ext`). All files are treated as local:
-  `skip_cloud` exists but is off and isn't exposed in the UI. The quarantine
-  folder is always excluded.
+  filter (`include_ext` / `exclude_ext`). All files are treated as local.
+  The quarantine folder is always excluded.
 - **Threads:** CPU cores + 4, max 16. Hashing is I/O-bound and `hashlib`
   releases the GIL on large buffers, so reads and hashing overlap. The
   quick, full and byte-compare stages all run in the pool. `Control`
@@ -167,9 +167,11 @@ moves added.
 
 ### `dd_export.py`
 
-Plain `csv` writers (UTF-8 with BOM so Excel opens them correctly):
+Each export is one `_csv(out_dir, name, header, rows)` call that streams rows
+from a generator (UTF-8 with BOM so Excel opens them correctly):
 `folder_sizes`, `storage_by_level`, `all_files_inventory`, `same_name_*`,
-`path_compare_summary`, `backup_root_pairs`, `scan_errors`.
+`path_compare_summary`, `backup_root_pairs`, `identical_files`, `scan_errors`.
+`level_totals()` also feeds the By level page.
 
 ## Modern UI: `dd_web.py` + `web/`
 
@@ -263,7 +265,7 @@ submenu, like the Apple image convertor project.
   empty space was clicked.
 - **Path always last:** Explorer quotes drive roots as `"C:\"`, and Windows
   argv parsing turns `\"` into a literal quote, so Python receives `C:"`.
-  Both entry points repair this (`clean_path`), but only reliably when the
+  Both entry points repair this (`dd_util.fix_drive`), but only reliably when the
   path is the final argument.
 - **No `wt.exe`:** the quick summary runs `python.exe` directly. Windows
   Terminal treats `;` in its command line as a tab separator, and Explorer
